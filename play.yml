@@ -1,0 +1,132 @@
+---
+- hosts: mons[0]
+  gather_facts: no
+  tasks:
+    - name: Set osd noout
+      become: yes
+      command: ceph osd set noout
+      changed_when: false
+    # We need to deploy the admin keyring on the OSD nodes so we can check OSD status
+    - name: Retrieve admin keyring
+      become: yes
+      slurp:
+        src: /etc/ceph/ceph.client.admin.keyring
+      register: __ceph_admin_keyring
+
+- hosts: osds
+  vars:
+    debug_out: yes # Set this to no to reduce the debug output from osd-omap-convert.sh
+    osd_limit_per_host: 2
+  tasks:
+    # We need to deploy the admin keyring on the OSD nodes so we can check OSD status
+    - name: Copy admin keyring
+      become: yes
+      copy:
+        dest: /etc/ceph/ceph.client.admin.keyring
+        content: "{{ __ceph_admin_keyring['content'] | b64decode }}"
+        owner: ceph
+        group: ceph
+        mode: 0600
+
+    - name: Gather OSD ids
+      become: yes
+      shell: |
+        systemctl list-units | awk '{print $1}' | grep ceph-osd@ | sed -e 's/ceph-osd@//' -e 's/\.service//'
+      check_mode: no
+      changed_when: false
+      register: __ceph_osd_ids
+  
+    - name: Set fact for OSD ids list
+      set_fact:
+        __osd_ids: "{{ __ceph_osd_ids.stdout_lines }}"
+      check_mode: no
+  
+    - name: Gather OSD omap formats
+      become: yes
+      shell: "egrep -ao 'leveldb|rocksdb' /var/lib/ceph/osd/ceph-{{ item }}/superblock"
+      check_mode: no
+      changed_when: false
+      register: __osd_omap_format
+      loop: "{{ __osd_ids }}"
+  
+    - name: Check if OSD is leveldb or rocksdb
+      set_fact:
+        __device_omap_format: "{{ __device_omap_format | default([]) + [[item.item, item.stdout]] }}"
+      no_log: yes
+      check_mode: no
+      loop: "{{ __osd_omap_format.results }}"
+
+    - name: Set fact for list of all leveldb OSDs
+      set_fact:
+        __osds_to_convert_all: "{{ __osds_to_convert_all | default([]) + [item.0] }}"
+      when: item.1 == 'leveldb'
+      loop: "{{ __device_omap_format }}"
+  
+    - name: Set fact for list of leveldb OSDs up to limit
+      set_fact:
+        __osds_to_convert: "{{ __osds_to_convert | default([]) + [item] }}"
+      when: idx < osd_limit_per_host
+      loop: "{{ __osds_to_convert_all | default([]) | sort }}"
+      loop_control:
+        index_var: idx
+
+    # This block is only executed if there are one or more OSDs using leveldb
+    - block:
+        - name: Notify how many OSDs will be converted
+          debug:
+            msg: "Proceeding to convert {{ __osds_to_convert | length }} OSDs: {{ __osds_to_convert | join(', ') }}"
+    
+        - name: pause
+          pause:
+            seconds: 5
+      
+        - name: Install ceph-test and jq packages
+          become: yes
+          package:
+            name:
+              - ceph-test
+              - jq
+            state: present
+      
+        - name: Deploy osd-omap-convert.sh script
+          become: yes
+          copy:
+            src: ./osd-omap-convert.sh
+            dest: /root/osd-omap-convert.sh
+            owner: root
+            group: root
+            mode: 0755
+  
+        - name: Run osd-omap-convert.sh script with OSD ids
+          become: yes
+          shell: "/root/osd-omap-convert.sh {{ item.0 }} rocksdb"
+          register: __osd_omap_convert_sh
+          loop: "{{ __osds_to_convert }}"
+      
+        - name: Clean osd-omap-convert.sh output
+          set_fact:
+            clean_osd_convert: "{{ clean_osd_convert|default([]) + [item.stdout_lines] }}"
+          loop: "{{ __osd_omap_convert_sh.results }}"
+          no_log: True
+          when:
+          - debug_out | bool
+      
+        - name: show osd-omap-convert.sh output
+          debug:
+            var: clean_osd_convert
+          when: debug_out | bool
+      when: __osds_to_convert | default([]) | length > 0
+
+    - block:
+        - name: Notify if there are no OSDs to convert on this host
+          debug:
+            msg: "There are no leveldb OSDs on this host"
+      when: __osds_to_convert | default([]) | length == 0
+
+- hosts: mons[0]
+  gather_facts: no
+  tasks:
+    - name: Unset osd noout
+      become: yes
+      command: ceph osd unset noout
+      changed_when: false
