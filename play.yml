@@ -18,16 +18,6 @@
     debug_out: yes # Set this to no to reduce the debug output from osd-omap-convert.sh
     osd_limit_per_host: 2
   tasks:
-    # We need to deploy the admin keyring on the OSD nodes so we can check OSD status
-    - name: Copy admin keyring
-      become: yes
-      copy:
-        dest: /etc/ceph/ceph.client.admin.keyring
-        content: "{{ __ceph_admin_keyring['content'] | b64decode }}"
-        owner: ceph
-        group: ceph
-        mode: 0600
-
     - name: Gather OSD ids
       become: yes
       shell: |
@@ -80,6 +70,16 @@
           pause:
             seconds: 5
       
+        # We need to deploy the admin keyring on the OSD nodes so we can check OSD status
+        - name: Copy admin keyring
+          become: yes
+          copy:
+            dest: /etc/ceph/ceph.client.admin.keyring
+            content: "{{ __ceph_admin_keyring['content'] | b64decode }}"
+            owner: ceph
+            group: ceph
+            mode: 0600
+
         - name: Install ceph-test and jq packages
           become: yes
           package:
@@ -96,25 +96,11 @@
             owner: root
             group: root
             mode: 0755
-  
-        - name: Run osd-omap-convert.sh script with OSD ids
-          become: yes
-          shell: "/root/osd-omap-convert.sh {{ item.0 }} rocksdb"
-          register: __osd_omap_convert_sh
+
+        # We use include_tasks so we can wrap the tasks in a block. If one OSD fails, we stop processing further OSDs
+        - name: include convert tasks
+          include_tasks: ./tasks/convert.yml
           loop: "{{ __osds_to_convert }}"
-      
-        - name: Clean osd-omap-convert.sh output
-          set_fact:
-            clean_osd_convert: "{{ clean_osd_convert|default([]) + [item.stdout_lines] }}"
-          loop: "{{ __osd_omap_convert_sh.results }}"
-          no_log: True
-          when:
-          - debug_out | bool
-      
-        - name: show osd-omap-convert.sh output
-          debug:
-            var: clean_osd_convert
-          when: debug_out | bool
       when: __osds_to_convert | default([]) | length > 0
 
     - block:

@@ -1,0 +1,22 @@
+---
+# We wrap this in a block so that if one OSD fails, we stop processing further OSDs
+- block:
+    - name: Run osd-omap-convert.sh script with OSD id
+      become: yes
+      shell: "/root/osd-omap-convert.sh {{ item.0 }} rocksdb"
+      register: __osd_omap_convert_sh
+  rescue:
+    - name: Convert failed
+      debug:
+        msg: "The conversion of OSD {{ item.0 }} failed"
+    - set_fact:
+        __osd_convert_status: ERROR
+  when:
+  - __osds_to_convert | default([]) | length > 0
+  - __osd_convert_status | default("") != "ERROR"
+
+- name: Show osd-omap-convert.sh output
+  debug:
+    var: __osd_omap_convert_sh.stdout_lines
+  when:
+  - debug_out | bool
