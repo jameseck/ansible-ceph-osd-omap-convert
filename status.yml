@@ -1,0 +1,45 @@
+---
+- hosts: osds
+  tasks:
+    - name: Gather OSD ids
+      become: yes
+      shell: |
+        systemctl list-units | awk '{print $1}' | grep ceph-osd@ | sed -e 's/ceph-osd@//' -e 's/\.service//'
+      check_mode: no
+      changed_when: false
+      register: __ceph_osd_ids
+  
+    - name: Set fact for OSD ids list
+      set_fact:
+        __osd_ids: "{{ __ceph_osd_ids.stdout_lines }}"
+      check_mode: no
+  
+    - name: Gather OSD omap formats
+      become: yes
+      shell: "egrep -ao 'leveldb|rocksdb' /var/lib/ceph/osd/ceph-{{ item }}/superblock"
+      check_mode: no
+      changed_when: false
+      register: __osd_omap_format
+      loop: "{{ __osd_ids }}"
+  
+    - name: Check if OSD is leveldb or rocksdb
+      set_fact:
+        __device_omap_format: "{{ __device_omap_format | default([]) + [[item.item, item.stdout]] }}"
+      no_log: yes
+      check_mode: no
+      loop: "{{ __osd_omap_format.results }}"
+
+    - name: Set fact for list of all leveldb OSDs
+      set_fact:
+        __osds_to_convert_all: "{{ __osds_to_convert_all | default([]) + [item.0] }}"
+      when: item.1 == 'leveldb'
+      loop: "{{ __device_omap_format }}"
+  
+    - name: Set fact for list of leveldb OSDs up to limit
+      set_fact:
+        __osds_to_convert: "{{ __osds_to_convert | default([]) + [item] }}"
+      loop: "{{ __osds_to_convert_all | default([]) | sort }}"
+
+    - name: OSD omap status
+      debug:
+        msg: "Total OSDs: {{ __osd_omap_format.results | length }}. Leveldb OSDS: {{ __osds_to_convert | default([]) | length }}"
